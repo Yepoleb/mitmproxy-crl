@@ -7,6 +7,7 @@ from mitmproxy.addons import clientplayback
 from mitmproxy.addons import command_history
 from mitmproxy.addons import comment
 from mitmproxy.addons import core
+from mitmproxy.addons import crl
 from mitmproxy.addons import cut
 from mitmproxy.addons import disable_h2c
 from mitmproxy.addons import dns_resolver
@@ -39,6 +40,7 @@ def default_addons():
         clientplayback.ClientPlayback(),
         command_history.CommandHistory(),
         comment.Comment(),
+        crl.Crl(),
         cut.Cut(),
         disable_h2c.DisableH2C(),
         export.Export(),

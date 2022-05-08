@@ -274,6 +274,14 @@ def dummy_cert(
     builder = builder.add_extension(
         x509.SubjectAlternativeName(ss), critical=not is_valid_commonname
     )
+
+    builder = builder.add_extension(x509.CRLDistributionPoints(
+        [x509.DistributionPoint(
+            [x509.UniformResourceIdentifier("http://crl.yepoleb.at/dummy.crl")],
+            None, None, None
+        )]
+    ), critical=False)
+
     cert = builder.sign(private_key=privkey, algorithm=hashes.SHA256())  # type: ignore
     return Cert(cert)
 
