@@ -4,7 +4,8 @@ import ipaddress
 import os
 import re
 import sys
-from dataclasses import dataclass
+import urllib.parse
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NewType, Optional, Union
 
@@ -20,6 +21,7 @@ from mitmproxy.coretypes import serializable
 # Default expiry must not be too long: https://github.com/mitmproxy/mitmproxy/issues/815
 CA_EXPIRY = datetime.timedelta(days=10 * 365)
 CERT_EXPIRY = datetime.timedelta(days=365)
+CRL_EXPIRY = datetime.timedelta(days=7)
 
 # Generated with "openssl dhparam". It's too slow to generate this on startup.
 DEFAULT_DHPARAM = b"""
@@ -156,6 +158,20 @@ class Cert(serializable.Serializable):
                 str(x) for x in ext.get_values_for_type(x509.IPAddress)
             ]
 
+    @property
+    def crl_distribution_points(self) -> list[str]:
+        try:
+            ext = self._cert.extensions.get_extension_for_class(
+                x509.CRLDistributionPoints
+            ).value
+        except x509.ExtensionNotFound:
+            return []
+        else:
+            return [
+                dist_point.full_name[0].value for dist_point in ext
+                if dist_point.full_name and isinstance(dist_point.full_name[0], x509.UniformResourceIdentifier)
+            ]
+
 
 def _name_to_keyval(name: x509.Name) -> list[tuple[str, str]]:
     parts = []
@@ -228,6 +244,7 @@ def dummy_cert(
     commonname: Optional[str],
     sans: list[str],
     organization: Optional[str] = None,
+    revocation: RevocationInfo = RevocationInfo(),
 ) -> Cert:
     """
     Generates a dummy certificate.
@@ -237,6 +254,7 @@ def dummy_cert(
     commonname: Common name for the generated certificate.
     sans: A list of Subject Alternate Names.
     organization: Organization name for the generated certificate.
+    crl_distribution_points: URIs of CRL distribution points
 
     Returns cert if operation succeeded, None if not.
     """
@@ -275,16 +293,50 @@ def dummy_cert(
         x509.SubjectAlternativeName(ss), critical=not is_valid_commonname
     )
 
-    builder = builder.add_extension(x509.CRLDistributionPoints(
-        [x509.DistributionPoint(
-            [x509.UniformResourceIdentifier("http://crl.yepoleb.at/dummy.crl")],
-            None, None, None
-        )]
-    ), critical=False)
+    fake_distribution_points = []
+    for upstream_distribution_point in revocation.crl_distribution_points:
+        upstream_url = urllib.parse.urlparse(upstream_distribution_point)
+        # Replace original URL path with the CA cert serial number, which acts as a magic token
+        fake_url = upstream_url._replace(path=str(cacert.serial_number) + ".crl").geturl()
+        fake_distribution_points.append(x509.DistributionPoint(
+            [x509.UniformResourceIdentifier(fake_url)],
+            relative_name=None, crl_issuer=None, reasons=None
+        ))
+    if fake_distribution_points:
+        builder = builder.add_extension(
+            x509.CRLDistributionPoints(fake_distribution_points), critical=False
+        )
 
     cert = builder.sign(private_key=privkey, algorithm=hashes.SHA256())  # type: ignore
     return Cert(cert)
 
+
+def dummy_crl(
+    privkey: rsa.RSAPrivateKey,
+    cacert: x509.Certificate,
+) -> bytes:
+    """
+    Generates an empty CRL signed with the CA key
+
+    privkey: CA private key
+    cacert: CA certificate
+
+    Returns a CRL DER encoded
+    """
+    builder = x509.CertificateRevocationListBuilder()
+    builder = builder.issuer_name(cacert.issuer)
+
+    now = datetime.datetime.now()
+    builder = builder.last_update(now)
+    builder = builder.next_update(now + CRL_EXPIRY)
+
+    builder = builder.add_extension(x509.CRLNumber(1000), False) # meaningless number
+    crl = builder.sign(private_key=privkey, algorithm=hashes.SHA256())
+    return crl.public_bytes(serialization.Encoding.DER)
+
+@dataclass
+class RevocationInfo:
+    crl_distribution_points: list[str] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class CertStoreEntry:
@@ -314,11 +366,13 @@ class CertStore:
         default_privatekey: rsa.RSAPrivateKey,
         default_ca: Cert,
         default_chain_file: Optional[Path],
+        default_crl: bytes,
         dhparams: DHParams,
     ):
         self.default_privatekey = default_privatekey
         self.default_ca = default_ca
         self.default_chain_file = default_chain_file
+        self.default_crl = default_crl
         self.dhparams = dhparams
         self.certs = {}
         self.expire_queue = []
@@ -375,11 +429,12 @@ class CertStore:
         dh = cls.load_dhparam(dhparam_file)
         certs = re.split(rb"(?=-----BEGIN CERTIFICATE-----)", raw)
         ca = Cert.from_pem(certs[1])
+        crl = dummy_crl(key, ca._cert)
         if len(certs) > 2:
             chain_file: Optional[Path] = ca_file
         else:
             chain_file = None
-        return cls(key, ca, chain_file, dh)
+        return cls(key, ca, chain_file, crl, dh)
 
     @staticmethod
     @contextlib.contextmanager
@@ -492,6 +547,7 @@ class CertStore:
         commonname: Optional[str],
         sans: list[str],
         organization: Optional[str] = None,
+        revocation: RevocationInfo = RevocationInfo(),
     ) -> CertStoreEntry:
         """
         commonname: Common name for the generated certificate. Must be a
@@ -521,6 +577,7 @@ class CertStore:
                     commonname,
                     sans,
                     organization,
+                    revocation,
                 ),
                 privatekey=self.default_privatekey,
                 chain_file=self.default_chain_file,

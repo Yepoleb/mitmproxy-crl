@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any, Optional, TypedDict
 
 from OpenSSL import SSL
-from mitmproxy import certs, ctx, exceptions, connection, tls
+from mitmproxy import certs, ctx, exceptions, connection, tls, http
 from mitmproxy.net import tls as net_tls
 from mitmproxy.options import CONF_BASENAME
 from mitmproxy.proxy import context
@@ -326,6 +326,7 @@ class TlsConfig:
         """
         altnames: list[str] = []
         organization: Optional[str] = None
+        revocation: RevocationInfo = RevocationInfo()
 
         # Use upstream certificate if available.
         if ctx.options.upstream_cert and conn_context.server.certificate_list:
@@ -335,6 +336,7 @@ class TlsConfig:
             altnames.extend(upstream_cert.altnames)
             if upstream_cert.organization:
                 organization = upstream_cert.organization
+            revocation.crl_distribution_points = upstream_cert.crl_distribution_points
 
         # Add SNI. If not available, try the server address as well.
         if conn_context.client.sni:
@@ -352,4 +354,15 @@ class TlsConfig:
 
         # RFC 2818: If a subjectAltName extension of type dNSName is present, that MUST be used as the identity.
         # In other words, the Common Name is irrelevant then.
-        return self.certstore.get_cert(altnames[0], altnames, organization)
+        return self.certstore.get_cert(altnames[0], altnames, organization, revocation)
+
+    async def request(self, flow):
+        if not flow.live or flow.error or flow.response:
+            return
+        # Check if a request has a magic CRL token at the end
+        magic_token = str(self.certstore.default_ca.serial) + ".crl"
+        if flow.request.path.endswith(magic_token):
+            # Serve CRL
+            flow.response = http.Response.make(
+                200, self.certstore.default_crl, {"Content-Type": "application/pkix-crl"}
+            )
