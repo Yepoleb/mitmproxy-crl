@@ -326,7 +326,7 @@ class TlsConfig:
         """
         altnames: list[str] = []
         organization: Optional[str] = None
-        revocation: RevocationInfo = RevocationInfo()
+        revocation: certs.RevocationInfo = certs.RevocationInfo()
 
         # Use upstream certificate if available.
         if ctx.options.upstream_cert and conn_context.server.certificate_list:

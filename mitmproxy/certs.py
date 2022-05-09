@@ -238,6 +238,11 @@ def create_ca(
     return private_key, cert
 
 
+@dataclass
+class RevocationInfo:
+    crl_distribution_points: list[str] = field(default_factory=list)
+
+
 def dummy_cert(
     privkey: rsa.RSAPrivateKey,
     cacert: x509.Certificate,
@@ -333,10 +338,6 @@ def dummy_crl(
     builder = builder.add_extension(x509.CRLNumber(1000), False) # meaningless number
     crl = builder.sign(private_key=privkey, algorithm=hashes.SHA256())
     return crl.public_bytes(serialization.Encoding.DER)
-
-@dataclass
-class RevocationInfo:
-    crl_distribution_points: list[str] = field(default_factory=list)
 
 @dataclass(frozen=True)
 class CertStoreEntry:
